@@ -52,9 +52,33 @@ class JaegerAnalyzer:
                         "statement": db_statement,
                         "duration": db_duration,
                         "startTime": span["startTime"],
+                        "tags": span["tags"],
+                        "parentSpanID": span.get("references", [{}])[0].get("spanID"),
                     }
                 )
         return db_spans
+
+    def find_method_in_source(self, spans, parent_span_id):
+        if not parent_span_id:
+            return None
+
+        for span in spans:
+            if span["spanID"] == parent_span_id:
+                method = None
+                namespace = None
+                for tag in span["tags"]:
+                    if tag["key"] == "code.function":
+                        method = tag["value"]
+                    elif tag["key"] == "code.namespace":
+                        namespace = tag["value"]
+                if method and namespace:
+                    return f"{namespace}.{method}"
+
+                return self.find_method_in_source(
+                    spans, span.get("references", [{}])[0].get("spanID")
+                )
+
+        return None
 
     def detect_n_plus_one(self, traces):
         issues = []
@@ -81,7 +105,6 @@ class JaegerAnalyzer:
                     count > self.count_threshold
                     and total_duration > self.duration_threshold
                 ):
-
                     first_db_span_start_time = min(
                         db_span["startTime"]
                         for db_span in db_spans
@@ -90,8 +113,16 @@ class JaegerAnalyzer:
                     has_preceding_span = any(
                         span["startTime"] < first_db_span_start_time for span in spans
                     )
-
                     if has_preceding_span and not statement.endswith("..."):
+
+                        method = None
+                        for db_span in db_spans:
+                            if db_span["statement"] == statement:
+                                method = self.find_method_in_source(
+                                    spans, db_span["parentSpanID"]
+                                )
+                                if method:
+                                    break
                         issues.append(
                             {
                                 "trace_id": trace_id,
@@ -99,6 +130,7 @@ class JaegerAnalyzer:
                                 "count": count,
                                 "total_duration": total_duration,
                                 "description": "Potential N+1 query detected",
+                                "method": method,
                             }
                         )
         return issues
